@@ -8,6 +8,7 @@ import fitz  # PyMuPDF
 from gtts import gTTS
 from google import genai
 from google.genai import types as genai_types
+from google.genai import errors as genai_errors
 from streamlit_autorefresh import st_autorefresh
 
 # ============================================================
@@ -16,7 +17,7 @@ from streamlit_autorefresh import st_autorefresh
 st.set_page_config(page_title="영어 단어 받아쓰기 도우미", page_icon="✏️", layout="centered")
 
 QUESTION_SECONDS = 20  # 문제당 제한 시간(초)
-GEMINI_MODEL = "gemini-1.5-flash"
+GEMINI_MODEL = "gemini-2.0-flash"
 
 BIG_CSS = """
 <style>
@@ -60,6 +61,7 @@ def init_state():
         "played_q": -1,
         "audio_cache": {},                # (text, lang) -> bytes
         "api_key": "",
+        "gemini_model": None,             # 자동 감지된 사용 가능 모델명 캐시
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -94,6 +96,20 @@ def get_audio_bytes(text, lang="en"):
     return data
 
 
+def _discover_gemini_model(client):
+    """계정에서 실제로 쓸 수 있는 텍스트+이미지 생성 모델을 찾는다.
+    Google이 모델명을 바꾸거나 예전 모델을 없애도 자동으로 대응하기 위함."""
+    candidates = []
+    for m in client.models.list():
+        actions = getattr(m, "supported_actions", None) or []
+        if "generateContent" in actions:
+            candidates.append(m.name)
+    if not candidates:
+        raise RuntimeError("사용 가능한 Gemini 모델을 찾지 못했습니다. API 키 권한을 확인해주세요.")
+    preferred = [n for n in candidates if "flash" in n.lower() and "lite" not in n.lower()]
+    return (preferred or candidates)[0]
+
+
 def extract_words_from_image(image_bytes, api_key, mime_type="image/jpeg"):
     client = genai.Client(api_key=api_key)
     prompt = (
@@ -104,13 +120,17 @@ def extract_words_from_image(image_bytes, api_key, mime_type="image/jpeg"):
         "3) 결과는 반드시 JSON 배열로만 응답하세요. 다른 설명은 절대 넣지 마세요.\n"
         '형식 예시: [{"word": "apple", "meaning": "사과"}, {"word": "book", "meaning": "책"}]'
     )
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=[
-            prompt,
-            genai_types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
-        ],
-    )
+    contents = [prompt, genai_types.Part.from_bytes(data=image_bytes, mime_type=mime_type)]
+    model_name = st.session_state.get("gemini_model") or GEMINI_MODEL
+    try:
+        response = client.models.generate_content(model=model_name, contents=contents)
+    except genai_errors.ClientError as e:
+        if getattr(e, "code", None) == 404 or "NOT_FOUND" in str(e):
+            model_name = _discover_gemini_model(client)
+            st.session_state.gemini_model = model_name
+            response = client.models.generate_content(model=model_name, contents=contents)
+        else:
+            raise
     content = response.text.strip()
 
     # 코드펜스나 잡텍스트가 섞여 와도 JSON 배열만 추출
