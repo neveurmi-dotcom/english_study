@@ -5,6 +5,7 @@ import time
 import io
 import json
 import base64
+import fitz  # PyMuPDF
 from gtts import gTTS
 from openai import OpenAI
 from streamlit_autorefresh import st_autorefresh
@@ -92,7 +93,7 @@ def get_audio_bytes(text, lang="en"):
     return data
 
 
-def extract_words_from_image(image_bytes, api_key):
+def extract_words_from_image(image_bytes, api_key, mime_type="image/jpeg"):
     client = OpenAI(api_key=api_key)
     b64 = base64.b64encode(image_bytes).decode("utf-8")
     prompt = (
@@ -112,7 +113,7 @@ def extract_words_from_image(image_bytes, api_key):
                     {"type": "text", "text": prompt},
                     {
                         "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+                        "image_url": {"url": f"data:{mime_type};base64,{b64}"},
                     },
                 ],
             }
@@ -129,6 +130,22 @@ def extract_words_from_image(image_bytes, api_key):
     json_str = content[start : end + 1]
     data = json.loads(json_str)
     return data
+
+
+def pdf_to_images(pdf_bytes, zoom=2.0):
+    """PDF의 각 페이지를 PNG 이미지 바이트로 변환한다."""
+    images = []
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    mat = fitz.Matrix(zoom, zoom)
+    for page in doc:
+        pix = page.get_pixmap(matrix=mat)
+        images.append(pix.tobytes("png"))
+    doc.close()
+    return images
+
+
+def is_pdf_file(uploaded_file):
+    return uploaded_file.name.lower().endswith(".pdf") or uploaded_file.type == "application/pdf"
 
 
 def set_word_bank(rows):
@@ -199,23 +216,50 @@ def page_register():
     tab1, tab2 = st.tabs(["📷 사진으로 등록 (OCR)", "📄 CSV 파일 불러오기"])
 
     with tab1:
-        uploaded_image = st.file_uploader(
-            "단어장 사진 업로드", type=["png", "jpg", "jpeg"], key="img_uploader"
+        uploaded_file = st.file_uploader(
+            "단어장 사진 또는 PDF 업로드",
+            type=["png", "jpg", "jpeg", "pdf"],
+            key="img_uploader",
         )
-        if uploaded_image is not None:
-            st.image(uploaded_image, caption="업로드한 이미지", use_container_width=True)
+
+        pdf_pages = None
+        if uploaded_file is not None:
+            if is_pdf_file(uploaded_file):
+                try:
+                    pdf_pages = pdf_to_images(uploaded_file.getvalue())
+                    st.caption(f"PDF에서 {len(pdf_pages)}페이지를 찾았어요.")
+                    cols = st.columns(min(len(pdf_pages), 4) or 1)
+                    for i, page_bytes in enumerate(pdf_pages):
+                        with cols[i % len(cols)]:
+                            st.image(page_bytes, caption=f"{i + 1}페이지", use_container_width=True)
+                except Exception as e:
+                    st.error(f"PDF를 여는 중 오류가 발생했습니다: {e}")
+            else:
+                st.image(uploaded_file, caption="업로드한 이미지", use_container_width=True)
 
         if st.button("🔍 단어 추출하기", type="primary"):
-            if uploaded_image is None:
-                st.error("먼저 이미지를 업로드해주세요.")
+            if uploaded_file is None:
+                st.error("먼저 이미지나 PDF를 업로드해주세요.")
             elif not get_api_key():
                 st.error("사이드바에 OpenAI API Key를 입력해주세요.")
             else:
-                with st.spinner("이미지에서 단어를 읽고 뜻을 만드는 중이에요..."):
+                with st.spinner("파일에서 단어를 읽고 뜻을 만드는 중이에요..."):
                     try:
-                        rows = extract_words_from_image(
-                            uploaded_image.getvalue(), get_api_key()
-                        )
+                        if is_pdf_file(uploaded_file):
+                            pages = pdf_pages if pdf_pages is not None else pdf_to_images(
+                                uploaded_file.getvalue()
+                            )
+                            rows = []
+                            for page_bytes in pages:
+                                rows.extend(
+                                    extract_words_from_image(
+                                        page_bytes, get_api_key(), mime_type="image/png"
+                                    )
+                                )
+                        else:
+                            rows = extract_words_from_image(
+                                uploaded_file.getvalue(), get_api_key()
+                            )
                         set_word_bank(rows)
                         st.success(f"{len(rows)}개의 단어를 추출했어요!")
                     except Exception as e:
