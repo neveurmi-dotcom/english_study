@@ -62,6 +62,11 @@ def init_state():
         "audio_cache": {},                # (text, lang) -> bytes
         "api_key": "",
         "gemini_model": None,             # 자동 감지된 사용 가능 모델명 캐시
+        "test_config": {
+            "show_answer_box": False,
+            "time_limit_seconds": QUESTION_SECONDS,  # None이면 시간 제한 없음
+        },
+        "user_answers": {},               # 문제 인덱스 -> 입력한 답
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -401,6 +406,48 @@ def page_setup():
 
     st.caption(f"선택한 구간에는 {len(available)}개의 단어가 있어요.")
 
+    st.markdown("---")
+    st.markdown("### 🎧 문제 종류")
+    question_type = st.radio(
+        "어떤 방식으로 문제를 낼까요?",
+        ["영어 발음만", "영어 + 한글 조합", "한글 뜻만"],
+        index=1,
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+    en_ratio = 100
+    if question_type == "한글 뜻만":
+        en_ratio = 0
+    elif question_type == "영어 + 한글 조합":
+        en_ratio = st.slider("영어 발음 비율 (%)", min_value=0, max_value=100, value=80, step=5)
+        st.caption(f"영어 발음 {en_ratio}% / 한글 뜻 {100 - en_ratio}% 비율로 출제됩니다.")
+
+    st.markdown("### ✏️ 답 입력창")
+    answer_box_choice = st.radio(
+        "화면에 정답 입력창을 보여줄까요?",
+        ["노출 안 함 (노트에 직접 적기)", "노출함 (화면에 입력)"],
+        index=0,
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+    show_answer_box = answer_box_choice == "노출함 (화면에 입력)"
+
+    st.markdown("### ⏱️ 제한 시간")
+    time_choice = st.radio(
+        "문제당 제한 시간을 사용할까요?",
+        ["시간 설정", "시간 제한 없음"],
+        index=0,
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+    time_limit_seconds = None
+    if time_choice == "시간 설정":
+        time_limit_seconds = st.number_input(
+            "문제당 제한 시간(초)", min_value=5, max_value=120, value=QUESTION_SECONDS, step=5
+        )
+
+    st.markdown("---")
+
     if st.button("🎯 테스트 시작하기", type="primary"):
         if start_id > end_id:
             st.error("시작 번호는 끝 번호보다 작거나 같아야 해요.")
@@ -410,7 +457,7 @@ def page_setup():
             sampled = available.sample(n=int(num_questions)).to_dict("records")
             questions = []
             for row in sampled:
-                mode = random.choices(["en", "kr"], weights=[0.8, 0.2])[0]
+                mode = random.choices(["en", "kr"], weights=[en_ratio, 100 - en_ratio])[0]
                 questions.append(
                     {
                         "id": row["번호"],
@@ -423,6 +470,11 @@ def page_setup():
             st.session_state.current_q = 0
             st.session_state.question_start_time = None
             st.session_state.played_q = -1
+            st.session_state.user_answers = {}
+            st.session_state.test_config = {
+                "show_answer_box": show_answer_box,
+                "time_limit_seconds": time_limit_seconds,
+            }
             go("test")
             st.rerun()
 
@@ -441,6 +493,9 @@ def page_test():
     questions = st.session_state.test_questions
     total = len(questions)
     idx = st.session_state.current_q
+    config = st.session_state.test_config
+    time_limit = config.get("time_limit_seconds")
+    show_answer_box = config.get("show_answer_box", False)
 
     if idx >= total:
         go("result")
@@ -452,27 +507,30 @@ def page_test():
     st.title("🔊 받아쓰기 테스트")
     st.progress((idx) / total, text=f"{idx + 1} / {total} 번 문제")
 
-    # 1초마다 자동 새로고침 (카운트다운용)
-    st_autorefresh(interval=1000, key=f"autorefresh_{idx}")
+    remaining = None
+    if time_limit:
+        # 1초마다 자동 새로고침 (카운트다운용)
+        st_autorefresh(interval=1000, key=f"autorefresh_{idx}")
 
-    if st.session_state.question_start_time is None:
-        st.session_state.question_start_time = time.time()
+        if st.session_state.question_start_time is None:
+            st.session_state.question_start_time = time.time()
 
-    elapsed = time.time() - st.session_state.question_start_time
-    remaining = max(0, QUESTION_SECONDS - int(elapsed))
+        elapsed = time.time() - st.session_state.question_start_time
+        remaining = max(0, time_limit - int(elapsed))
 
-    st.metric("⏳ 남은 시간(초)", remaining)
-    st.progress(remaining / QUESTION_SECONDS)
+        st.metric("⏳ 남은 시간(초)", remaining)
+        st.progress(remaining / time_limit)
 
     st.markdown("---")
 
     replay_clicked = st.button("🔊 다시 듣기", key=f"replay_{idx}")
 
+    where = "화면 입력창에" if show_answer_box else "노트에"
     if q["mode"] == "en":
-        st.markdown("### 잘 듣고 노트에 영어 스펠링을 적어보세요!")
+        st.markdown(f"### 잘 듣고 {where} 영어 스펠링을 적어보세요!")
         audio_bytes = get_audio_bytes(q["word"], lang="en")
     else:
-        st.markdown("### 뜻을 보고(듣고) 영어 단어를 노트에 적어보세요!")
+        st.markdown(f"### 뜻을 보고(듣고) {where} 영어 단어를 적어보세요!")
         st.markdown(f"<div class='big-word'>{q['meaning']}</div>", unsafe_allow_html=True)
         audio_bytes = get_audio_bytes(q["meaning"], lang="ko")
 
@@ -487,20 +545,26 @@ def page_test():
 
     st.markdown("---")
 
-    # Enter 키 또는 버튼으로 다음 문제 이동
-    with st.form(key=f"next_form_{idx}", clear_on_submit=True):
-        st.text_input(
-            "이 칸에 커서를 두고 Enter를 누르면 다음 문제로 넘어가요",
-            key=f"enter_trigger_{idx}",
-            placeholder="여기 클릭 후 Enter ↵ (또는 아래 버튼 클릭)",
-        )
-        submitted = st.form_submit_button("➡️ 다음 문제", type="primary", use_container_width=True)
+    if show_answer_box:
+        # 정답 입력창 노출: Enter 또는 버튼으로 제출하면서 입력한 답을 저장한다.
+        with st.form(key=f"next_form_{idx}", clear_on_submit=True):
+            answer = st.text_input(
+                "정답을 입력하세요 (영어 스펠링)",
+                key=f"answer_input_{idx}",
+                placeholder="여기에 정답을 입력하고 Enter ↵ (또는 아래 버튼 클릭)",
+            )
+            submitted = st.form_submit_button("➡️ 다음 문제", type="primary", use_container_width=True)
+        if submitted:
+            st.session_state.user_answers[idx] = answer
+            advance_question()
+            st.rerun()
+    else:
+        # 입력창 미노출: 노트에 직접 적고 버튼으로만 다음 문제로 이동한다.
+        if st.button("➡️ 다음 문제", type="primary", use_container_width=True, key=f"next_btn_{idx}"):
+            advance_question()
+            st.rerun()
 
-    if submitted:
-        advance_question()
-        st.rerun()
-
-    if remaining <= 0:
+    if remaining is not None and remaining <= 0:
         advance_question()
         st.rerun()
 
@@ -510,21 +574,39 @@ def page_test():
 # ============================================================
 def page_result():
     st.title("✅ 정답 확인")
-    st.caption("노트에 적은 답과 아래 정답을 비교하며 채점해보세요.")
 
     questions = st.session_state.test_questions
+    show_answer_box = st.session_state.test_config.get("show_answer_box", False)
+    user_answers = st.session_state.user_answers
+
+    if show_answer_box:
+        st.caption("화면에 입력한 답을 자동으로 채점했어요.")
+    else:
+        st.caption("노트에 적은 답과 아래 정답을 비교하며 채점해보세요.")
+
     rows = []
-    for i, q in enumerate(questions, start=1):
+    correct_count = 0
+    for i, q in enumerate(questions):
         mode_label = "🔊 영어 음성" if q["mode"] == "en" else "🇰🇷 한글 뜻"
-        rows.append(
-            {
-                "문제 번호": i,
-                "출제 방식": mode_label,
-                "정답(영어 스펠링)": q["word"],
-                "정답(한글 뜻)": q["meaning"],
-            }
-        )
+        row = {
+            "문제 번호": i + 1,
+            "출제 방식": mode_label,
+            "정답(영어 스펠링)": q["word"],
+            "정답(한글 뜻)": q["meaning"],
+        }
+        if show_answer_box:
+            user_answer = (user_answers.get(i) or "").strip()
+            is_correct = user_answer.lower() == q["word"].strip().lower()
+            if is_correct:
+                correct_count += 1
+            row["내가 입력한 답"] = user_answer
+            row["채점"] = "⭕ 정답" if is_correct else "❌ 오답"
+        rows.append(row)
     result_df = pd.DataFrame(rows)
+
+    if show_answer_box:
+        st.metric("점수", f"{correct_count} / {len(questions)}")
+
     st.dataframe(result_df, use_container_width=True, hide_index=True)
 
     score_hint = st.columns(2)
@@ -536,6 +618,7 @@ def page_result():
             st.session_state.test_questions = []
             st.session_state.current_q = 0
             st.session_state.question_start_time = None
+            st.session_state.user_answers = {}
             go("setup")
             st.rerun()
 
