@@ -96,9 +96,9 @@ def get_audio_bytes(text, lang="en"):
     return data
 
 
-def _discover_gemini_model(client):
-    """계정에서 실제로 쓸 수 있는 텍스트+이미지 생성 모델을 찾는다.
-    Google이 모델명을 바꾸거나 예전 모델을 없애도 자동으로 대응하기 위함."""
+def _candidate_gemini_models(client):
+    """계정에서 실제로 쓸 수 있는 텍스트+이미지 생성 모델 목록을 우선순위대로 반환한다.
+    모델마다 무료 할당량이 따로 배정되므로, 하나가 막혀도(404/429) 다른 걸 시도하기 위함."""
     candidates = []
     for m in client.models.list():
         actions = getattr(m, "supported_actions", None) or []
@@ -106,8 +106,21 @@ def _discover_gemini_model(client):
             candidates.append(m.name)
     if not candidates:
         raise RuntimeError("사용 가능한 Gemini 모델을 찾지 못했습니다. API 키 권한을 확인해주세요.")
-    preferred = [n for n in candidates if "flash" in n.lower() and "lite" not in n.lower()]
-    return (preferred or candidates)[0]
+
+    def rank(name):
+        n = name.lower()
+        if "flash" in n and "lite" not in n and "preview" not in n and "exp" not in n:
+            return 0
+        if "flash" in n:
+            return 1
+        return 2
+
+    ordered = sorted(set(candidates), key=rank)
+    cached = st.session_state.get("gemini_model")
+    if cached and cached in ordered:
+        ordered.remove(cached)
+        ordered.insert(0, cached)
+    return ordered
 
 
 def extract_words_from_image(image_bytes, api_key, mime_type="image/jpeg"):
@@ -121,16 +134,33 @@ def extract_words_from_image(image_bytes, api_key, mime_type="image/jpeg"):
         '형식 예시: [{"word": "apple", "meaning": "사과"}, {"word": "book", "meaning": "책"}]'
     )
     contents = [prompt, genai_types.Part.from_bytes(data=image_bytes, mime_type=mime_type)]
-    model_name = st.session_state.get("gemini_model") or GEMINI_MODEL
-    try:
-        response = client.models.generate_content(model=model_name, contents=contents)
-    except genai_errors.ClientError as e:
-        if getattr(e, "code", None) == 404 or "NOT_FOUND" in str(e):
-            model_name = _discover_gemini_model(client)
-            st.session_state.gemini_model = model_name
+
+    cached_model = st.session_state.get("gemini_model")
+    response = None
+    last_error = None
+
+    # 1) 이전에 성공했던 모델(또는 기본 모델)을 먼저 시도해 API 호출을 아낀다.
+    for model_name in [cached_model or GEMINI_MODEL]:
+        try:
             response = client.models.generate_content(model=model_name, contents=contents)
-        else:
-            raise
+            st.session_state.gemini_model = model_name
+        except (genai_errors.ClientError, genai_errors.ServerError) as e:
+            last_error = e
+
+    # 2) 실패했다면(모델 없음/할당량 소진 등) 계정에서 쓸 수 있는 다른 모델들을 순서대로 시도한다.
+    if response is None:
+        for model_name in _candidate_gemini_models(client):
+            try:
+                response = client.models.generate_content(model=model_name, contents=contents)
+                st.session_state.gemini_model = model_name
+                break
+            except (genai_errors.ClientError, genai_errors.ServerError) as e:
+                last_error = e
+                continue
+
+    if response is None:
+        raise last_error or RuntimeError("Gemini 요청에 실패했습니다.")
+
     content = response.text.strip()
 
     # 코드펜스나 잡텍스트가 섞여 와도 JSON 배열만 추출
