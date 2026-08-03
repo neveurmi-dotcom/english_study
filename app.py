@@ -4,10 +4,10 @@ import random
 import time
 import io
 import json
-import base64
 import fitz  # PyMuPDF
 from gtts import gTTS
-from openai import OpenAI
+from google import genai
+from google.genai import types as genai_types
 from streamlit_autorefresh import st_autorefresh
 
 # ============================================================
@@ -16,6 +16,7 @@ from streamlit_autorefresh import st_autorefresh
 st.set_page_config(page_title="영어 단어 받아쓰기 도우미", page_icon="✏️", layout="centered")
 
 QUESTION_SECONDS = 20  # 문제당 제한 시간(초)
+GEMINI_MODEL = "gemini-1.5-flash"
 
 BIG_CSS = """
 <style>
@@ -75,7 +76,7 @@ def get_api_key():
     if st.session_state.api_key:
         return st.session_state.api_key
     try:
-        return st.secrets["OPENAI_API_KEY"]
+        return st.secrets["GEMINI_API_KEY"]
     except Exception:
         return ""
 
@@ -94,8 +95,7 @@ def get_audio_bytes(text, lang="en"):
 
 
 def extract_words_from_image(image_bytes, api_key, mime_type="image/jpeg"):
-    client = OpenAI(api_key=api_key)
-    b64 = base64.b64encode(image_bytes).decode("utf-8")
+    client = genai.Client(api_key=api_key)
     prompt = (
         "다음 이미지는 초등학생용 영어 단어장을 촬영한 사진입니다.\n"
         "1) 이미지 속에 있는 모든 영어 단어를 순서대로 정확히 추출하세요.\n"
@@ -104,23 +104,14 @@ def extract_words_from_image(image_bytes, api_key, mime_type="image/jpeg"):
         "3) 결과는 반드시 JSON 배열로만 응답하세요. 다른 설명은 절대 넣지 마세요.\n"
         '형식 예시: [{"word": "apple", "meaning": "사과"}, {"word": "book", "meaning": "책"}]'
     )
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:{mime_type};base64,{b64}"},
-                    },
-                ],
-            }
+    response = client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=[
+            prompt,
+            genai_types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
         ],
-        max_tokens=2000,
     )
-    content = response.choices[0].message.content.strip()
+    content = response.text.strip()
 
     # 코드펜스나 잡텍스트가 섞여 와도 JSON 배열만 추출
     start = content.find("[")
@@ -174,10 +165,11 @@ def sidebar():
     with st.sidebar:
         st.header("⚙️ 설정")
         key_input = st.text_input(
-            "OpenAI API Key",
+            "Google Gemini API Key",
             value=st.session_state.api_key,
             type="password",
-            help="이미지에서 단어를 추출하고 뜻을 생성할 때 사용됩니다.",
+            help="이미지/PDF에서 단어를 추출하고 뜻을 생성할 때 사용됩니다. "
+            "aistudio.google.com/apikey 에서 무료로 발급받을 수 있어요.",
         )
         st.session_state.api_key = key_input
 
@@ -241,7 +233,7 @@ def page_register():
             if uploaded_file is None:
                 st.error("먼저 이미지나 PDF를 업로드해주세요.")
             elif not get_api_key():
-                st.error("사이드바에 OpenAI API Key를 입력해주세요.")
+                st.error("사이드바에 Google Gemini API Key를 입력해주세요.")
             else:
                 with st.spinner("파일에서 단어를 읽고 뜻을 만드는 중이에요..."):
                     try:
