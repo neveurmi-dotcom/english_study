@@ -76,9 +76,9 @@ init_state()
 # ============================================================
 def get_api_key():
     if st.session_state.api_key:
-        return st.session_state.api_key
+        return st.session_state.api_key.strip()
     try:
-        return st.secrets["GEMINI_API_KEY"]
+        return st.secrets["GEMINI_API_KEY"].strip()
     except Exception:
         return ""
 
@@ -191,7 +191,12 @@ def sidebar():
             help="이미지/PDF에서 단어를 추출하고 뜻을 생성할 때 사용됩니다. "
             "aistudio.google.com/apikey 에서 무료로 발급받을 수 있어요.",
         )
-        st.session_state.api_key = key_input
+        st.session_state.api_key = key_input.strip()
+        if key_input and not key_input.strip().isascii():
+            st.warning(
+                "API 키에 한글 등 특수 문자가 섞여 있는 것 같아요. "
+                "키 입력창을 비우고 영문/숫자로만 된 키를 다시 붙여넣어 주세요."
+            )
 
         st.markdown("---")
         st.subheader("진행 단계")
@@ -254,6 +259,11 @@ def page_register():
                 st.error("먼저 이미지나 PDF를 업로드해주세요.")
             elif not get_api_key():
                 st.error("사이드바에 Google Gemini API Key를 입력해주세요.")
+            elif not get_api_key().isascii():
+                st.error(
+                    "API 키에 한글 등 특수 문자가 섞여 있어요. 사이드바에서 키를 지우고 "
+                    "영문/숫자로만 된 키를 다시 붙여넣은 뒤 시도해주세요."
+                )
             else:
                 with st.spinner("파일에서 단어를 읽고 뜻을 만드는 중이에요..."):
                     try:
