@@ -4,6 +4,7 @@ import random
 import time
 import io
 import json
+import os
 import fitz  # PyMuPDF
 from gtts import gTTS
 from google import genai
@@ -18,6 +19,23 @@ st.set_page_config(page_title="영어 단어 받아쓰기 도우미", page_icon=
 
 QUESTION_SECONDS = 20  # 문제당 제한 시간(초)
 GEMINI_MODEL = "gemini-2.0-flash"
+
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+WORD_BANK_PATH = os.path.join(DATA_DIR, "word_bank.csv")
+
+
+def load_word_bank():
+    if os.path.exists(WORD_BANK_PATH):
+        try:
+            return pd.read_csv(WORD_BANK_PATH)
+        except Exception:
+            pass
+    return pd.DataFrame(columns=["번호", "영어단어", "한글뜻"])
+
+
+def save_word_bank(df):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    df.to_csv(WORD_BANK_PATH, index=False, encoding="utf-8-sig")
 
 BIG_CSS = """
 <style>
@@ -54,7 +72,6 @@ st.markdown(BIG_CSS, unsafe_allow_html=True)
 def init_state():
     defaults = {
         "page": "register",              # register -> setup -> test -> result
-        "word_bank": pd.DataFrame(columns=["번호", "영어단어", "한글뜻"]),
         "test_questions": [],            # [{id, word, meaning, mode}]
         "current_q": 0,
         "question_start_time": None,
@@ -71,6 +88,8 @@ def init_state():
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
+    if "word_bank" not in st.session_state:
+        st.session_state.word_bank = load_word_bank()
 
 
 init_state()
@@ -79,13 +98,17 @@ init_state()
 # ============================================================
 # 공통 유틸
 # ============================================================
-def get_api_key():
-    if st.session_state.api_key:
-        return st.session_state.api_key.strip()
+def get_secret_api_key():
     try:
         return st.secrets["GEMINI_API_KEY"].strip()
     except Exception:
         return ""
+
+
+def get_api_key():
+    if st.session_state.api_key:
+        return st.session_state.api_key.strip()
+    return get_secret_api_key()
 
 
 def get_audio_bytes(text, lang="en"):
@@ -200,6 +223,7 @@ def set_word_bank(rows):
     df = df.rename(columns={"word": "영어단어", "meaning": "한글뜻"})
     df.insert(0, "번호", range(1, len(df) + 1))
     st.session_state.word_bank = df
+    save_word_bank(df)
 
 
 def renumber(df):
@@ -219,8 +243,13 @@ def go(page):
 def sidebar():
     with st.sidebar:
         st.header("⚙️ 설정")
+        secret_key = get_secret_api_key()
+        label = "Google Gemini API Key"
+        if secret_key:
+            st.success("✅ 저장된 Gemini API 키를 사용 중이에요.")
+            label += " (필요할 때만 임시로 다른 키 입력, 비워두면 저장된 키 사용)"
         key_input = st.text_input(
-            "Google Gemini API Key",
+            label,
             value=st.session_state.api_key,
             type="password",
             help="이미지/PDF에서 단어를 추출하고 뜻을 생성할 때 사용됩니다. "
@@ -334,6 +363,7 @@ def page_register():
                 else:
                     df = renumber(df[["영어단어", "한글뜻"]])
                     st.session_state.word_bank = df
+                    save_word_bank(df)
                     st.success(f"{len(df)}개의 단어를 불러왔어요!")
             except Exception as e:
                 st.error(f"CSV를 읽는 중 오류가 발생했습니다: {e}")
@@ -351,7 +381,9 @@ def page_register():
         )
         if st.button("💾 수정 내용 저장"):
             cleaned = edited.dropna(subset=["영어단어", "한글뜻"])
-            st.session_state.word_bank = renumber(cleaned)
+            new_bank = renumber(cleaned)
+            st.session_state.word_bank = new_bank
+            save_word_bank(new_bank)
             st.success("저장되었습니다.")
             st.rerun()
 
@@ -538,7 +570,13 @@ def page_test():
     # 끊기지 않도록, 매 rerun마다 동일한 위치에서 항상 렌더링한다.
     # autoplay는 이 문제가 처음 나타났을 때(또는 다시 듣기 클릭 시)만 True로 준다.
     should_autoplay = replay_clicked or st.session_state.played_q != idx
-    st.audio(audio_bytes, format="audio/mp3", autoplay=should_autoplay)
+    audio_ph = st.empty()
+    if should_autoplay:
+        # 같은 소리를 속성만 바꿔 다시 그리면 브라우저가 "새로 불러온 것"으로
+        # 인식하지 못해 다시 듣기가 재생되지 않는다. 슬롯을 비웠다가 다시
+        # 채워 완전히 새로 마운트되도록 강제한다.
+        audio_ph.empty()
+    audio_ph.audio(audio_bytes, format="audio/mp3", autoplay=should_autoplay)
     st.caption("소리가 자동으로 나오지 않으면 위 재생 버튼이나 '🔊 다시 듣기'를 눌러주세요.")
     if should_autoplay:
         st.session_state.played_q = idx
