@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import random
 import time
@@ -36,6 +37,7 @@ def load_word_bank():
 def save_word_bank(df):
     os.makedirs(DATA_DIR, exist_ok=True)
     df.to_csv(WORD_BANK_PATH, index=False, encoding="utf-8-sig")
+
 
 BIG_CSS = """
 <style>
@@ -514,11 +516,19 @@ def page_setup():
 # ============================================================
 # 3) 받아쓰기 테스트 진행 페이지
 # ============================================================
-def advance_question():
-    st.session_state.current_q += 1
+def go_to_question(new_idx):
+    st.session_state.current_q = max(0, new_idx)
     st.session_state.question_start_time = None
     if st.session_state.current_q >= len(st.session_state.test_questions):
         go("result")
+
+
+def advance_question():
+    go_to_question(st.session_state.current_q + 1)
+
+
+def previous_question():
+    go_to_question(st.session_state.current_q - 1)
 
 
 def page_test():
@@ -555,8 +565,6 @@ def page_test():
 
     st.markdown("---")
 
-    replay_clicked = st.button("🔊 다시 듣기", key=f"replay_{idx}")
-
     where = "화면 입력창에" if show_answer_box else "노트에"
     if q["mode"] == "en":
         st.markdown(f"### 잘 듣고 {where} 영어 스펠링을 적어보세요!")
@@ -568,39 +576,81 @@ def page_test():
 
     # 1초마다 오는 자동 새로고침 중에도 오디오 엘리먼트가 사라져 재생이
     # 끊기지 않도록, 매 rerun마다 동일한 위치에서 항상 렌더링한다.
-    # autoplay는 이 문제가 처음 나타났을 때(또는 다시 듣기 클릭 시)만 True로 준다.
-    should_autoplay = replay_clicked or st.session_state.played_q != idx
-    audio_ph = st.empty()
-    if should_autoplay:
-        # 같은 소리를 속성만 바꿔 다시 그리면 브라우저가 "새로 불러온 것"으로
-        # 인식하지 못해 다시 듣기가 재생되지 않는다. 슬롯을 비웠다가 다시
-        # 채워 완전히 새로 마운트되도록 강제한다.
-        audio_ph.empty()
-    audio_ph.audio(audio_bytes, format="audio/mp3", autoplay=should_autoplay)
-    st.caption("소리가 자동으로 나오지 않으면 위 재생 버튼이나 '🔊 다시 듣기'를 눌러주세요.")
+    # autoplay는 새 문제로 넘어와 처음 그릴 때만 True로 준다.
+    should_autoplay = st.session_state.played_q != idx
+    st.audio(audio_bytes, format="audio/mp3", autoplay=should_autoplay)
     if should_autoplay:
         st.session_state.played_q = idx
+
+    # "다시 듣기"는 서버 왕복(rerun) 없이 브라우저에서 바로 오디오를
+    # 재생시켜야 한다. rerun을 거치면 그사이 사용자 클릭이라는 맥락이
+    # 끊겨 브라우저의 자동재생 차단 정책에 걸려 소리가 안 나기 때문이다.
+    # st.markdown(unsafe_allow_html=True)은 onclick 같은 인라인 이벤트
+    # 속성을 자동으로 제거하므로, sanitize를 거치지 않는 components.html
+    # (별도 iframe)에 버튼을 넣고 부모 문서의 오디오를 직접 제어한다.
+    components.html(
+        """
+        <style>
+          body { margin: 0; font-family: "Source Sans Pro", sans-serif; }
+          .replay-btn {
+            display: block; width: 100%; box-sizing: border-box;
+            font-size: 1.3rem; padding: 0.7em 1.4em; border-radius: 14px;
+            font-weight: 700; background-color: #31333F; color: #FAFAFA;
+            border: 1px solid rgba(250, 250, 250, 0.3); cursor: pointer;
+            text-align: center;
+          }
+          .replay-btn:hover { border-color: #FF4B4B; color: #FF4B4B; }
+        </style>
+        <button class="replay-btn" onclick="
+            var a = window.parent.document.querySelector('audio');
+            if (a) { a.currentTime = 0; a.play(); }
+        ">🔊 다시 듣기</button>
+        """,
+        height=64,
+    )
+    st.caption("소리가 자동으로 나오지 않으면 위 재생 버튼이나 '🔊 다시 듣기'를 눌러주세요.")
 
     st.markdown("---")
 
     if show_answer_box:
         # 정답 입력창 노출: Enter 또는 버튼으로 제출하면서 입력한 답을 저장한다.
-        with st.form(key=f"next_form_{idx}", clear_on_submit=True):
-            answer = st.text_input(
+        with st.form(key=f"next_form_{idx}"):
+            st.text_input(
                 "정답을 입력하세요 (영어 스펠링)",
                 key=f"answer_input_{idx}",
                 placeholder="여기에 정답을 입력하고 Enter ↵ (또는 아래 버튼 클릭)",
             )
-            submitted = st.form_submit_button("➡️ 다음 문제", type="primary", use_container_width=True)
-        if submitted:
-            st.session_state.user_answers[idx] = answer
-            advance_question()
+            col1, col2 = st.columns([1, 2])
+            with col1:
+                prev_clicked = st.form_submit_button(
+                    "⬅️ 이전", use_container_width=True, disabled=(idx == 0)
+                )
+            with col2:
+                submitted = st.form_submit_button(
+                    "➡️ 다음 문제", type="primary", use_container_width=True
+                )
+        if submitted or prev_clicked:
+            st.session_state.user_answers[idx] = st.session_state.get(f"answer_input_{idx}", "")
+            if submitted:
+                advance_question()
+            else:
+                previous_question()
             st.rerun()
     else:
-        # 입력창 미노출: 노트에 직접 적고 버튼으로만 다음 문제로 이동한다.
-        if st.button("➡️ 다음 문제", type="primary", use_container_width=True, key=f"next_btn_{idx}"):
-            advance_question()
-            st.rerun()
+        # 입력창 미노출: 노트에 직접 적고 버튼으로만 문제 사이를 이동한다.
+        col1, col2 = st.columns([1, 2])
+        with col1:
+            if st.button(
+                "⬅️ 이전", use_container_width=True, key=f"prev_btn_{idx}", disabled=(idx == 0)
+            ):
+                previous_question()
+                st.rerun()
+        with col2:
+            if st.button(
+                "➡️ 다음 문제", type="primary", use_container_width=True, key=f"next_btn_{idx}"
+            ):
+                advance_question()
+                st.rerun()
 
     if remaining is not None and remaining <= 0:
         advance_question()
